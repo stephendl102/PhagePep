@@ -206,14 +206,9 @@ def translatefastq(mer,filenamefastq,startflank,endflank,filenameoutput,PhD7):
     text = ""
     for idx in range(len(NukeArray)):
         text.join(NukeArray[idx])
-        AAarray.append(translate(text.join(NukeArray[idx])))
-
-    new_textings = []
-    for texting in AAarray:
-        new_texting = texting.replace('_', 'Q')   # replace stop (_) with (Q)
-        new_textings.append(new_texting)
-    AAarray = []
-    AAarray = new_textings
+        AA = translate(text.join(NukeArray[idx]))
+        AA = AA.replace('_', 'Q')
+        AAarray.append(AA)
 
     print('Determining frequencies')
     # determine frequencies
@@ -253,5 +248,8 @@ def translatefastq(mer,filenamefastq,startflank,endflank,filenameoutput,PhD7):
     print('Part 1 of program finished')
     return
 
+print(snakemake.input[0])
+print(snakemake.output[0])
 for i in range(len(snakemake.input)):
+    print(i)
     translatefastq(snakemake.config["mer"],snakemake.input[i],snakemake.config["startflank"],snakemake.config["endflank"],snakemake.output[i],snakemake.config["PHD7"])
