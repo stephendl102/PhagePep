@@ -3,30 +3,30 @@
 "startflank": 'TCT',
 "mer": 7,
 "PHD7": 1,
-"libnum": 7,
-"posnum": 4,
+"libnum": 8,
+"posnum": 5,
 "matnum": 100000,
 "average_negative": false,
 
-"translate_input_directory": "/Users/stephen/Desktop/PythonPhastPep/PHASTPEPPaperData/CAF1.fastq",
-"translate_output_directory": "/Users/stephen/Desktop/PythonPhastPep/PHASTPEPPaperData/CAF1.xlsx",
+"translate_input": "/Users/stephen/Desktop/NGS_Data/StrepIOMEGA/",
+"translate_output": "/Users/stephen/Desktop/NGS_Data/StrepIOMEGA/",
 
 #
 "peptide_input": "/Users/stephen/Desktop/PythonPhastPep/PHASTPEPPaperData/PaperStreptxlsx/Strept4R2SRR3314065.xlsx",
 "peptide_output": "/Users/stephen/Desktop/PythonPhastPep/PHASTPEPPaperData/PaperStreptxlsx/Strept4R2SRR3314065.fasta",
 
 #design_choices
-"pos_input_directory" : "/Users/stephen/Desktop/PythonPhastPep/TranslatedPHASTPepPaperData/NotIncluded/Strep/",
+"pos_input_directory" : "/Users/stephen/Desktop/NGS_Data/StrepIOMEGA/CxBxR2/",
 
-"positive_reffile" : ["ReferenceLibraries/PhastpepPaper8_8_22_Naive.xlsx","ReferenceLibraries/PhastpepPaper8_8_22_Naive.xlsx","ReferenceLibraries/PhastpepPaper8_8_22_Naive.xlsx","ReferenceLibraries/PhastpepPaper8_8_22_Naive.xlsx"],
+"positive_reffile" : ["ReferenceLibraries/PhastpepPaper8_8_22_Naive.xlsx","ReferenceLibraries/PhastpepPaper8_8_22_Naive.xlsx","ReferenceLibraries/PhastpepPaper8_8_22_Naive.xlsx","ReferenceLibraries/PhastpepPaper8_8_22_Naive.xlsx","ReferenceLibraries/PhastpepPaper8_8_22_Naive.xlsx","ReferenceLibraries/PhastpepPaper8_8_22_Naive.xlsx"],
 
 "neg_input_directory" : "/Users/stephen/Desktop/PythonPhastPep/TranslatedPHASTPepPaperData/NotIncluded/VCAM/",
 
 "negative_reffile": ["ReferenceLibraries/PhastpepPaper8_8_22_Naive.xlsx","ReferenceLibraries/PhastpepPaper8_8_22_Naive.xlsx","ReferenceLibraries/PhastpepPaper8_8_22_Naive.xlsx"],
 
-"output_file_part2": "/Users/stephen/Desktop/PythonPhastPep/AmplificationSquaredAvgEqualsFalseDropNa.xlsx",
-}
+"output_file_part2": "/Users/stephen/Desktop/Desktop/NGS_Data/StrepIOMEGA/CxBxR2/CxBxR2.xlsx",
 
 # SQL
 "SQL_input_directory": "/Users/stephen/Desktop/PythonPhastPep/PHASTPEPPaperData/PaperStreptxlsx/",
 "SQL_output_directory": "/Users/stephen/Desktop/PythonPhastPep/PHASTPEPPaperData/PaperStreptxlsx/",
+}
