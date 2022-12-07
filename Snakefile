@@ -4,18 +4,20 @@ configfile: "NGSanalyze.json"
 
 
 
-
 #print(config["output_file_part2"]+'Normalized.xlsx')
 #print(expand(config["translate_output_directory"]+"{name}.xlsx", name=NAMES))
 
-translate_fastq_files = glob_wildcards(config["translate_input_directory"]+'{name}.fastq')
+translate_fastq_files = glob_wildcards(config["translate_input"]+'{name}.fastq')
 NAMES = sorted(translate_fastq_files.name)
+
+print(config["translate_input"])
+expand(config["translate_input"]+"{name}.fastq", name=NAMES)
 
 rule translate_fastq:
     input:
-        config["translate_input_directory"] if os.path.isfile(config["translate_input_directory"]) else expand(config["translate_input_directory"]+"{name}.fastq", name=NAMES)
+        config["translate_input"] if os.path.isfile(config["translate_input"]) else expand(config["translate_input"]+"{name}.fastq", name=NAMES)
     output:
-        config["translate_output_directory"] if os.path.isfile(config["translate_input_directory"]) else expand(config["translate_output_directory"]+"{name}.fastq", name=NAMES)
+        config["translate_output"] if os.path.isfile(config["translate_output"]) else expand(config["translate_output"]+"{name}.xlsx", name=NAMES)
     script:
         "src/translatefastq2.py"
 
@@ -54,7 +56,7 @@ rule design_choices:
 
 rule false_positives:
     input:
-        expand(config["translate_output_directory"]+"{name}.xlsx", name=NAMES)
+        expand(config["translate_output"]+"{name}.xlsx", name=NAMES)
 
 rule visualization:
     input:
