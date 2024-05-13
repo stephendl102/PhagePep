@@ -62,18 +62,18 @@ def diff(string_table, target_idx): #target_idx is the idx being looped through
 
     for i, string in enumerate(string_list): #finds all sequences that are similar to current sequence in loop
         if len(string) == len(target_string):
-            diff_count = sum([1 for j in range(len(string)) if string[j] != target_string[j]])
-            if diff_count == 1 and string_table.iloc[i,0] <= (filter_percent*target_freq) :
+            diff_idx = ([j for j in range(len(string)) if string[j] != target_string[j]])
+            if (len(diff_idx) == 1) and string_table.iloc[i,0] <= (filter_percent*target_freq) :
                 indexes.append(i)
                 Corrected[i]=target_string
-            if diff_count == 2 and string_table.iloc[i,0] <= (pow(filter_percent, 2)*target_freq) :
+            if (len(diff_idx) == 2) and string_table.iloc[i,0] <= (pow(filter_percent, 2)*target_freq) :
                 indexes.append(i)
                 Corrected[i]=target_string
-            if diff_count == 3 and string_table.iloc[i,0] <= (pow(filter_percent, 3)*target_freq) :
+            if (len(diff_idx) == 3) and string_table.iloc[i,0] <= (pow(filter_percent, 3)*target_freq) :
                 indexes.append(i)
                 Corrected[i]=target_string
     return indexes, Corrected
-
+    
 def translate(seq):
 
     table = {
