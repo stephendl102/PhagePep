@@ -1,1 +1,3 @@
 # PhagePep
+
+Must install snakemake
