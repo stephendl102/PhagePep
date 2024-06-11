@@ -30,33 +30,14 @@ import collections
 import pandas as pd
 import math
 import time
+import statistics
 # must pip install openpyxl
 
-def readFastq(filename):
-    """Reads FASTQ file and remove the special characters!"""
-
-    sequences = []
-    qualities = []
-    with open(filename) as fh:
-        while True:
-            fh.readline() # skip name line
-            seq = fh.readline().rstrip() # read base sequence
-            fh.readline() # skip placeholder line
-            qual = fh.readline().rstrip() #base quality line
-            if len(seq) == 0:
-                break
-            sequences.append(seq)
-            qualities.append(qual)
-    return sequences, qualities
-
-def diff(string_table, target_idx): #target_idx is the idx being looped through
+def diff(string_table, target_idx,filter_percent): #target_idx is the idx being looped through
     target_freq = string_table.iloc[target_idx,0]
 
     string_list = string_table.index
     target_string = string_list[target_idx]
-
-    filter_percent= .03
-
     indexes = []
     Corrected = list(string_list)
 
@@ -73,6 +54,10 @@ def diff(string_table, target_idx): #target_idx is the idx being looped through
                 indexes.append(i)
                 Corrected[i]=target_string
     return indexes, Corrected
+
+# Function to convert ASCII character to Phred score
+def ascii_to_phred(char):
+    return ord(char) - 33
 
 def translate(seq):
 
@@ -107,140 +92,105 @@ def translate(seq):
     return protein
 
 def translatefastq(mer,filenamefastq,startflank,endflank,filenameoutput,PhD7,collapse):
+    ticstart = time.time()
     ip = str(filenamefastq)
-    #print(ip)
-    #result = subprocess.run(["grep -o 'TCTCAC.*TCGGCCGAA' ", 'wc -l'], stdout=subprocess.PIPE,input=ip)
-    #result.stdout.decode('utf-8')
-    #print(result)
     print("Importing file " + filenamefastq)
-    # import fastq file
-    RawData, Qual = readFastq(filenamefastq)
+    basepairs=3*mer                                               # calculate number of basepairs
+
+    tic = time.time()
+    pattern = str(startflank) + '.*' + str(endflank)
+    print(pattern)
+    QualDataCommand = ["grep", "-A", "2", "-o", pattern, filenamefastq]
+    awk_command = ["awk", "NR % 4 == 3"]
+
+    grep_process = subprocess.Popen(QualDataCommand, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    awk_process = subprocess.Popen(awk_command, stdin=grep_process.stdout, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    grep_process.stdout.close()
+    output, errors = awk_process.communicate()
+    Qual = output.decode().splitlines()
+    print(len(Qual))
+    toc = time.time()
+    print('Time Taken: ', toc-tic)
+    tic = time.time()
+
+    # Run the command and capture the output
+    RawDataCommand = ["grep", "-o", pattern, filenamefastq]
+    RawDataResult = subprocess.run(RawDataCommand, capture_output=True, text=True)
+    # Check for errors
+    if RawDataResult.returncode != 0:
+        print("Error:", result.stderr)
+    else:
+        # Split the output into a list of lines
+        RawData = RawDataResult.stdout.splitlines()
+
+    toc = time.time()
+    print('Time Taken: ', toc-tic)
 
     ReadDepth0 = len(RawData)
-    print(ReadDepth0)
+    print('Total Reads: ', ReadDepth0)
     print(RawData[0], Qual[0])
     print(RawData[1], Qual[1])
 
     print('Input file successfully imported')
-    basepairs=3*mer                                               # calculate number of basepairs
 
     # put nucleotide sequences in array
-    print('Isolating peptide sequences')
-    First_idx = [s.find(endflank) for idx, s in enumerate(RawData)] # find end, PhD7 = 'GGTGGAGGT'
-    Second_idx = [s.rfind(endflank) for idx, s in enumerate(RawData)] # find end, PhD7 = 'GGTGGAGGT'
+    print('Ensuring all reads are :', str(basepairs+len(startflank)+len(endflank)))
+    filtered_list1 = [item[len(startflank):-(len(endflank))] for item in RawData if len(item) == (basepairs+len(startflank)+len(endflank))]
 
-    print('Eliminating misreads with double endflank')
-    # misreads
-    for j in range(len(First_idx)):
-        if First_idx[j] != Second_idx[j]:                                   # deal with misreads that contain endflank twice
-            First_idx[j]=0
-        elif First_idx[j]<(3*mer+3):                                         # deal with reads that have endflank at beginning
-            First_idx[j]=0
-    End = First_idx
+    #32 is temporary, it must change based on where startflank occurs
+    Qual = [Qual[idx][32+len(startflank):32+(basepairs+len(startflank))] for idx, item in enumerate(RawData) if len(item) >= (basepairs+len(startflank)+len(endflank))]
+    RawData = filtered_list1
 
-    tic = time.time()
-    print('Eliminating misreads with no endflank')
-    # reads without end flanking region
-    RawData_df = pd.DataFrame(RawData)
-    QualData_df = pd.DataFrame(Qual)
-    indices_df = pd.DataFrame(End)
+    ReadDepth0 = len(RawData)
+    print('Total Reads: ', ReadDepth0)
+    print(RawData[0], Qual[0])
+    print(RawData[1], Qual[1])
 
-    endvalues = np.array(indices_df,dtype=object)
-    searchval = 0
-    ii = np.where(endvalues == 0)[0] # reads where missing or multiple endflank
 
-    RawData_df = RawData_df.drop(ii)
-    RawData_df = RawData_df.reset_index(drop=True)
-    QualData_df = QualData_df.drop(ii)
-    QualData_df = QualData_df.reset_index(drop=True)
-    indices_df = indices_df.drop(ii)
-    indices_df = indices_df.reset_index(drop=True)
+    # Calculate the average quality score for each read
+    average_quality_scores = []
+    for quality_scores in Qual:
+        phred_scores = [ascii_to_phred(char) for char in quality_scores]
+        average_quality = sum(phred_scores) / len(phred_scores)
+        average_quality_scores.append(average_quality)
 
-    indicesMat = indices_df.iloc[:,0].tolist()
-    RawData = RawData_df.iloc[:,0].tolist()
-    QualData = QualData_df.iloc[:,0].tolist()
+    std_dev = statistics.stdev(average_quality_scores)
+    print('std_dev :',std_dev)
+
+    # Calculate the overall average of the average quality scores
+    overall_average_quality = (sum(average_quality_scores) / len(average_quality_scores))
+    Error_Rate = 1/(10**(overall_average_quality/10))
+
+    adjusted_average_quality = overall_average_quality-2*std_dev
+    Adj_Error_Rate = 1/(10**(adjusted_average_quality/10))
+
+    filter_percent= Adj_Error_Rate*basepairs
+
+    print("Average error rate per base call: ", Error_Rate)
+    print("5th percentile average error rate per base call: ", Adj_Error_Rate)
+
+
+    print("Length after filtering wrong length reads:", len(RawData))
     toc = time.time()
     print(toc-tic)
-    print(len(RawData))
 
     tic = time.time()
-    print('Finding indices with startflank')
-    # find indices with startflank
-    rep1 = np.ones(len(indicesMat))
-    indstart1 = [s-((basepairs+len(startflank))*rep1[idx]) for idx, s in enumerate(indicesMat)]        # start of where startflank should be
-    indstart2 = [s-(basepairs+1)*rep1[idx] for idx, s in enumerate(indicesMat)]                           # end of where startflank should be
-    startMat = np.chararray([len(indstart1),3])
-    startMatCell = []
-    for idx, s in enumerate(RawData):
-        a = RawData[idx]
-        startMatCell.append((a[int(indstart1[idx]):int(indstart2[idx])+1]))
+    print('Making Nucleotide and Quality Array')
 
-    toc = time.time()
-    print(toc-tic)
-    print(len(startMatCell))
+    NukeArray = [list(item) for item in RawData]
+    QualData = [list(item) for item in Qual]
 
-    print('Isolating indices of correct reads and dropping reads with incorrect length')
-    tic = time.time()
-    # isolate indices of correct reads
-    indicesMat_df = pd.DataFrame(indicesMat)
-    RawData_df = pd.DataFrame(RawData)
-    QualData_df = pd.DataFrame(QualData)
-    startMatCell_df = pd.DataFrame(startMatCell)
-
-    values = np.array(startMatCell,dtype=object)
-    searchval = startflank
-    ii = np.where(values != searchval)[0] #dropping where the reads at location startflank are not equal to TCT
-    RawData_df = RawData_df.drop(ii)
-    RawData_df = RawData_df.reset_index(drop=True)
-    QualData_df = QualData_df.drop(ii)
-    QualData_df = QualData_df.reset_index(drop=True)
-    indices_df = indices_df.drop(ii)
-    indices_df = indices_df.reset_index(drop=True)
-    startMatCell_df = startMatCell_df.drop(ii)
-    startMatCell_df = startMatCell_df.reset_index(drop=True)
-
-    indicesMat = indices_df.to_numpy()
-    RawData = RawData_df.iloc[:,0].tolist()
-    QualData = QualData_df.iloc[:,0].tolist()
-    startMatCell = startMatCell_df.to_numpy()
-    toc = time.time()
-    print(toc-tic)
-    print(len(startMatCell))
-    tic = time.time()
-    print('Making array of indices of sequences')
-    # make array of indices of sequences
-    rep1 = np.ones(len(indicesMat))
-    indSeq1 = [s-(basepairs*rep1[idx]) for idx, s in enumerate(indicesMat)]
-    indSeq2 = [s-rep1[idx] for idx, s in enumerate(indicesMat)]
-
-    # pull out sequence
-    a = []
-    b = []
-    for idx, s in enumerate(RawData):
-        a.append(list(s))
-    for idx, z in enumerate(QualData):
-        b.append(list(z))
-    RawData = a
-    QualData = b
-    NukeArray= []
-    QualArray= []
+    print('NukeArray0: ', NukeArray[0])
     i=0
-    for i in range(len(RawData)):                                # Store Peptide Sequences as Charcater List
-        NukeArray.append(RawData[i][int(indSeq1[i]):(int(indSeq2[i])+1)])
-        QualArray.append(QualData[i][int(indSeq1[i]):(int(indSeq2[i])+1)])
     toc = time.time()
     print(len(NukeArray))
     print(toc-tic)
 
-    print('Collapsing Misreads')
+    print('Counting Reads')
     # determine frequencies
-    SeqArray = []
-    Qual = []
-    Seqtext = ""
-    Qualtext = ""
-    for idx in range(len(NukeArray)):
-        SeqArray.append(Seqtext.join(NukeArray[idx]))
-        Qual.append(Qualtext.join(QualArray[idx]))
+    SeqArray = [''.join(seq) for seq in NukeArray]
+    Qual = [''.join(qual) for qual in QualData]
+
     tableSeq = collections.Counter(SeqArray)                                # calculate frequencies
     df = pd.DataFrame.from_dict(tableSeq, orient='index')
     print(df)
@@ -251,25 +201,28 @@ def translatefastq(mer,filenamefastq,startflank,endflank,filenameoutput,PhD7,col
     print('ReadDepth ',ReadDepth)
 
     if collapse == True:
+        print('Collapsing Misreads')
         DropFreq = ReadDepth0/100000
         DNAFreqTable = DNAFreqTable[DNAFreqTable.iloc[:, 0] >= DropFreq] # dropping Frequency <11
         print('Length After Dropping <', DropFreq, ':',len(DNAFreqTable))
 
-        idx = 0
-        while idx < .1*len(DNAFreqTable):
-            Errors, Correctedidx = diff(DNAFreqTable,idx)
+        idx = 0  # Initialize the index
+        print('Filter Percentage: ', filter_percent)
+        while idx < 0.1 * len(DNAFreqTable):
+            # Check the condition to end the loop
+            if DNAFreqTable.iloc[idx,0] * filter_percent < min(DNAFreqTable.iloc[:,0]):
+                print('break')
+                break
+            Errors, Correctedidx = diff(DNAFreqTable,idx,filter_percent)
             DNAFreqTable.index = Correctedidx
             print(idx, len(Errors))
             idx += 1
 
+    print('Filter Percentage: ', filter_percent)
     DNAFreqTable = DNAFreqTable.groupby(DNAFreqTable.index).agg('sum')
     RawData2 = DNAFreqTable.iloc[:,0].tolist()
-    NukeArray= []
-    i=0
-    for i in range(len(RawData2)):                                # Store Peptide Sequences as Charcater List
-        NukeArray.append(RawData[i][int(indSeq1[i]):(int(indSeq2[i])+1)])
+    NukeArray = [list(item) for item in DNAFreqTable.index.tolist()]
     toc = time.time()
-    print(len(NukeArray))
     print(toc-tic)
 
     #Make Sure NUKEARRAY IS being updated from DNAFREQTABLE
@@ -312,7 +265,9 @@ def translatefastq(mer,filenamefastq,startflank,endflank,filenameoutput,PhD7,col
         AAarray.append(AA)
     DNAFreqTable['AA'] = AAarray
     DNAFreqTable['Normalized_Freq'] = DNAFreqTable[0] / ReadDepth0
+    DNAFreqTable['5th_Percentile_Per_base_error'] = Adj_Error_Rate
     #DNAFreqTable['Normalized_FreqInsert'] = DNAFreqTable[0] / ReadDepth
+    print('Total Reads ', sum(DNAFreqTable.iloc[:, 0]))
 
 
     print('Determining frequencies')
@@ -352,6 +307,8 @@ def translatefastq(mer,filenamefastq,startflank,endflank,filenameoutput,PhD7,col
                 p=p+1                                                              # count up
     libraryexcel=SeqFreqTable                                              # output
     print('Part 1 of program finished')
+    tocend = time.time()
+    print('Total Time :',tocend-ticstart)
     return
 
 print(snakemake.input)
