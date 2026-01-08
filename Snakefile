@@ -1,4 +1,3 @@
-
 import glob
 from datetime import datetime
 
@@ -21,7 +20,7 @@ rule translate:
     output:
         config["translate_output"] if os.path.isfile(config["translate_output"]) else expand(config["translate_output"]+str(date_time)+"{name}.xlsx", name=NAMES)
     script:
-        "src/translatefastq2_12_24.py"
+        "src/translatefastq5_27_24.py"
 
 Pep_files = glob_wildcards(config["peptide_input"]+'{name}.xlsx')
 pepNAMES = sorted(Pep_files.name)
