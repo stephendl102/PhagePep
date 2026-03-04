@@ -24,6 +24,7 @@
 """
 from difflib import SequenceMatcher
 import os
+import subprocess
 import numpy as np
 import collections
 import pandas as pd
@@ -33,6 +34,7 @@ import time
 
 def readFastq(filename):
     """Reads FASTQ file and remove the special characters!"""
+
     sequences = []
     qualities = []
     with open(filename) as fh:
@@ -53,7 +55,7 @@ def diff(string_table, target_idx): #target_idx is the idx being looped through
     string_list = string_table.index
     target_string = string_list[target_idx]
 
-    filter_percent= .01
+    filter_percent= .03
 
     indexes = []
     Corrected = list(string_list)
@@ -105,11 +107,15 @@ def translate(seq):
     return protein
 
 def translatefastq(mer,filenamefastq,startflank,endflank,filenameoutput,PhD7,collapse):
-
+    ip = str(filenamefastq)
+    #print(ip)
+    #result = subprocess.run(["grep -o 'TCTCAC.*TCGGCCGAA' ", 'wc -l'], stdout=subprocess.PIPE,input=ip)
+    #result.stdout.decode('utf-8')
+    #print(result)
     print("Importing file " + filenamefastq)
     # import fastq file
     RawData, Qual = readFastq(filenamefastq)
-    print(len(RawData))
+
     print(RawData[0], Qual[0])
     print(RawData[1], Qual[1])
 
@@ -224,6 +230,52 @@ def translatefastq(mer,filenamefastq,startflank,endflank,filenameoutput,PhD7,col
     print(len(NukeArray))
     print(toc-tic)
 
+    ReadDepth0 = len(RawData)
+    print(ReadDepth0)
+
+    print('Collapsing Misreads')
+    # determine frequencies
+    SeqArray = []
+    Qual = []
+    Seqtext = ""
+    Qualtext = ""
+    for idx in range(len(NukeArray)):
+        SeqArray.append(Seqtext.join(NukeArray[idx]))
+        Qual.append(Qualtext.join(QualArray[idx]))
+    tableSeq = collections.Counter(SeqArray)                                # calculate frequencies
+    df = pd.DataFrame.from_dict(tableSeq, orient='index')
+    print(df)
+    DNAFreqTable = df.sort_values(by=0, ascending=False)
+    print(DNAFreqTable)
+    print('NumOfPep :',len(DNAFreqTable))
+    ReadDepth = sum(DNAFreqTable.iloc[:, 0])
+    print('ReadDepth ',ReadDepth)
+
+    if collapse == True:
+        DropFreq = ReadDepth0/100000
+        DNAFreqTable = DNAFreqTable[DNAFreqTable.iloc[:, 0] >= DropFreq] # dropping Frequency <11
+        print('Length After Dropping <', DropFreq, ':',len(DNAFreqTable))
+
+        idx = 0
+        while idx < .1*len(DNAFreqTable):
+            Errors, Correctedidx = diff(DNAFreqTable,idx)
+            DNAFreqTable.index = Correctedidx
+            #print(idx, len(Errors))
+            idx += 1
+
+    DNAFreqTable = DNAFreqTable.groupby(DNAFreqTable.index).agg('sum')
+    RawData2 = DNAFreqTable.iloc[:,0].tolist()
+    NukeArray= []
+    i=0
+    for i in range(len(RawData2)):                                # Store Peptide Sequences as Charcater List
+        NukeArray.append(RawData[i][int(indSeq1[i]):(int(indSeq2[i])+1)])
+    toc = time.time()
+    print(len(NukeArray))
+    print(toc-tic)
+
+    #Make Sure NUKEARRAY IS being updated from DNAFREQTABLE
+    print('Len NukArray ',len(NukeArray))
+    print('Total Reads ', sum(DNAFreqTable.iloc[:, 0]))
     print('Getting rid of codons not used by PhD7 library')
     tic = time.time()
     # If PhD7 library, get rid of codons not used by PhD7 library
@@ -243,43 +295,14 @@ def translatefastq(mer,filenamefastq,startflank,endflank,filenameoutput,PhD7,col
             or badRead4[idx]=='C' or badRead5[idx]=='C' or badRead6[idx]=='C' or badRead7[idx]=='C'):
                 brRow.append(idx)                                # find indices of instances of bad reads
         for i in sorted(brRow, reverse=True):
+            #print(NukeArray[i])
             NukeArray.pop(i)
-            QualArray.pop(i)                                   # delete bad codon reads
+            #QualArray.pop(i)                                   # delete bad codon reads
     toc = time.time()
     print(toc-tic)
-    print(len(NukeArray))
+    print('Len NukeArray ',len(NukeArray))
     # convert to amino acids
 
-    print('Collapsing Misreads')
-    # determine frequencies
-    SeqArray = []
-    Qual = []
-    Seqtext = ""
-    Qualtext = ""
-    for idx in range(len(NukeArray)):
-        SeqArray.append(Seqtext.join(NukeArray[idx]))
-        Qual.append(Qualtext.join(QualArray[idx]))
-    tableSeq = collections.Counter(SeqArray)                                # calculate frequencies
-    df = pd.DataFrame.from_dict(tableSeq, orient='index')
-    print(df)
-    DNAFreqTable = df.sort_values(by=0, ascending=False)
-    print(DNAFreqTable)
-    print('NumOfPep :',len(DNAFreqTable))
-
-    if collapse == True:
-        print(.00001*sum(DNAFreqTable.iloc[:, 0]))
-        DNAFreqTable = DNAFreqTable[DNAFreqTable.iloc[:, 0] >= .00001*sum(DNAFreqTable.iloc[:, 0])] # dropping Frequency <11
-        print('Length After Dropping <11',len(DNAFreqTable))
-
-        idx = 0
-        while idx < .05*len(DNAFreqTable):
-            Errors, Correctedidx = diff(DNAFreqTable,idx)
-            DNAFreqTable.index = Correctedidx
-            print(idx, len(Errors))
-            idx += 1
-
-
-    DNAFreqTable = DNAFreqTable.groupby(DNAFreqTable.index).agg('sum')
     print('Converting to amino acid sequences')
     AAarray = []
     text = ""
@@ -289,6 +312,8 @@ def translatefastq(mer,filenamefastq,startflank,endflank,filenameoutput,PhD7,col
         AA = AA.replace('_', 'Q')
         AAarray.append(AA)
     DNAFreqTable['AA'] = AAarray
+    DNAFreqTable['Normalized_Freq'] = DNAFreqTable[0] / ReadDepth0
+    #DNAFreqTable['Normalized_FreqInsert'] = DNAFreqTable[0] / ReadDepth
 
 
     print('Determining frequencies')
@@ -299,12 +324,12 @@ def translatefastq(mer,filenamefastq,startflank,endflank,filenameoutput,PhD7,col
     SeqFreqTable = DNAFreqTable.sort_values(by=0, ascending=False)                                   # sort table                                       # Sequences
 
     # display stats
-    print("Number of total valid reads: ", len(AAarray))
+    print("Number of total valid reads: ", sum(DNAFreqTable.iloc[:, 0]))
     print("Number of unique reads: ", len(SeqFreqTable))
 
     print('Starting export')
     # export to excel
-    iterationsXLS = int(math.ceil(len(SeqFreqTable)/1000000))              # Determine if for loops necessary
+    iterationsXLS = int(math.ceil(len(SeqFreqTable)/1000000))              # Filter out sequences that make up < .0001% of screen
     p=1                                                                    # initialize counter
     if iterationsXLS==1:
         print('Exporting to excel: one sheet')

@@ -53,24 +53,26 @@ def diff(string_table, target_idx): #target_idx is the idx being looped through
     string_list = string_table.index
     target_string = string_list[target_idx]
 
-    filter_percent= .01
+    filter_percent= .1
 
+    #print((0.01*target_freq))
     indexes = []
     Corrected = list(string_list)
 
     for i, string in enumerate(string_list): #finds all sequences that are similar to current sequence in loop
         if len(string) == len(target_string):
-            diff_count = sum([1 for j in range(len(string)) if string[j] != target_string[j]])
-            if diff_count == 1 and string_table.iloc[i,0] <= (filter_percent*target_freq) :
+            diff_idx = ([j for j in range(len(string)) if string[j] != target_string[j]])
+            if (len(diff_idx) == 1) and string_table.iloc[i,0] <= (filter_percent*target_freq) :
                 indexes.append(i)
                 Corrected[i]=target_string
-            if diff_count == 2 and string_table.iloc[i,0] <= (pow(filter_percent, 2)*target_freq) :
+            if (len(diff_idx) == 2) and string_table.iloc[i,0] <= (pow(filter_percent, 2)*target_freq) :
                 indexes.append(i)
                 Corrected[i]=target_string
-            if diff_count == 3 and string_table.iloc[i,0] <= (pow(filter_percent, 3)*target_freq) :
+            if (len(diff_idx) == 3) and string_table.iloc[i,0] <= (pow(filter_percent, 3)*target_freq) :
                 indexes.append(i)
                 Corrected[i]=target_string
     return indexes, Corrected
+
 
 def translate(seq):
 
@@ -224,6 +226,35 @@ def translatefastq(mer,filenamefastq,startflank,endflank,filenameoutput,PhD7,col
     print(len(NukeArray))
     print(toc-tic)
 
+    print('Collapsing Misreads')
+    # determine frequencies
+    SeqArray = []
+    Qual = []
+    Seqtext = ""
+    Qualtext = ""
+    for idx in range(len(NukeArray)):
+        SeqArray.append(Seqtext.join(NukeArray[idx]))
+        Qual.append(Qualtext.join(QualArray[idx]))
+    tableSeq = collections.Counter(SeqArray)                                # calculate frequencies
+    df = pd.DataFrame.from_dict(tableSeq, orient='index')
+    DNAFreqTable = df.sort_values(by=0, ascending=False)
+    print('NumOfPep :',len(DNAFreqTable))
+    DNAFreqTable = DNAFreqTable[DNAFreqTable.iloc[:, 0] >= 5] # dropping Frequency <11
+
+    if collapse == True:
+        #DNAFreqTable = DNAFreqTable[DNAFreqTable.iloc[:, 0] >= 10] # dropping Frequency <11
+
+        Errors = [1]
+        idx = 0
+        while len(Errors) > 0:
+            pep_list = DNAFreqTable.index
+            Errors, NewSeq = diff(DNAFreqTable,idx)
+            #DNAFreqTable.drop(DNAFreqTable.index[Errors], axis=0, inplace=True)
+            DNAFreqTable.index = NewSeq
+            idx += 1
+            print(idx, len(Errors))
+    print(len(DNAFreqTable))
+
     print('Getting rid of codons not used by PhD7 library')
     tic = time.time()
     # If PhD7 library, get rid of codons not used by PhD7 library
@@ -250,36 +281,6 @@ def translatefastq(mer,filenamefastq,startflank,endflank,filenameoutput,PhD7,col
     print(len(NukeArray))
     # convert to amino acids
 
-    print('Collapsing Misreads')
-    # determine frequencies
-    SeqArray = []
-    Qual = []
-    Seqtext = ""
-    Qualtext = ""
-    for idx in range(len(NukeArray)):
-        SeqArray.append(Seqtext.join(NukeArray[idx]))
-        Qual.append(Qualtext.join(QualArray[idx]))
-    tableSeq = collections.Counter(SeqArray)                                # calculate frequencies
-    df = pd.DataFrame.from_dict(tableSeq, orient='index')
-    print(df)
-    DNAFreqTable = df.sort_values(by=0, ascending=False)
-    print(DNAFreqTable)
-    print('NumOfPep :',len(DNAFreqTable))
-
-    if collapse == True:
-        print(.00001*sum(DNAFreqTable.iloc[:, 0]))
-        DNAFreqTable = DNAFreqTable[DNAFreqTable.iloc[:, 0] >= .00001*sum(DNAFreqTable.iloc[:, 0])] # dropping Frequency <11
-        print('Length After Dropping <11',len(DNAFreqTable))
-
-        idx = 0
-        while idx < .05*len(DNAFreqTable):
-            Errors, Correctedidx = diff(DNAFreqTable,idx)
-            DNAFreqTable.index = Correctedidx
-            print(idx, len(Errors))
-            idx += 1
-
-
-    DNAFreqTable = DNAFreqTable.groupby(DNAFreqTable.index).agg('sum')
     print('Converting to amino acid sequences')
     AAarray = []
     text = ""
@@ -289,6 +290,7 @@ def translatefastq(mer,filenamefastq,startflank,endflank,filenameoutput,PhD7,col
         AA = AA.replace('_', 'Q')
         AAarray.append(AA)
     DNAFreqTable['AA'] = AAarray
+    print(DNAFreqTable['AA'])
 
 
     print('Determining frequencies')
@@ -304,7 +306,7 @@ def translatefastq(mer,filenamefastq,startflank,endflank,filenameoutput,PhD7,col
 
     print('Starting export')
     # export to excel
-    iterationsXLS = int(math.ceil(len(SeqFreqTable)/1000000))              # Determine if for loops necessary
+    iterationsXLS = int(math.ceil(len(SeqFreqTable)/100000000))              # Determine if for loops necessary
     p=1                                                                    # initialize counter
     if iterationsXLS==1:
         print('Exporting to excel: one sheet')
@@ -330,7 +332,8 @@ def translatefastq(mer,filenamefastq,startflank,endflank,filenameoutput,PhD7,col
     print('Part 1 of program finished')
     return
 
-print(snakemake.input)
+print(len(snakemake.input))
+print(snakemake.input[0])
 print(snakemake.output)
 for i in range(len(snakemake.input)):
     print(i)
