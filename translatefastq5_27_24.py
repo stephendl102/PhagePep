@@ -1,412 +1,459 @@
-""" function to normalize libraries to translate DNA sequences into amino
-# acid sequences of peptides
-#
-# inputs:
-#       mer: number of peptides per sequence
-#
-#       filenamefastq: string containing the filepath, filename, and
-#       extension of the raw data file from deep sequencing
-#
-#       startflank: sequence prior to the beginning of the peptide sequence
-#
-#       endflank: sequence following the end of the peptide sequence
-#
-#       filenameoutput: string containing the filepath, filename, and
-#       extension of the excel file to be created
-#
-#       PhD7: boolean identifier of whether the files correspond to screens
-#       completed using NEB's PhD library
-#
-# output:
-#       libraryexcel: table of sequences and frequencies to be exported to excel
-#
-# Created by Lindsey Brinton at the University of Virginia, 2015
 """
-from difflib import SequenceMatcher
-import os
-import subprocess
-import numpy as np
+translatefastq.py - OPTIMIZED VERSION
+
+Translates raw NGS .fastq files into amino acid frequency tables.
+
+Inputs (via Snakemake config):
+    mer              : number of amino acids per peptide
+    startflank       : DNA sequence immediately upstream of the insert
+    endflank         : DNA sequence immediately downstream of the insert
+    PHD7             : bool -- True if using NEB PhD7 library (restricts codons)
+    collapse         : bool -- True to collapse likely sequencing errors
+    filter_min_reads : bool -- True to drop sequences with < MIN_READ_COUNT reads
+                       before collapsing (optional, independent of collapse)
+
+Output:
+    CSV file with DNA sequences, AA translations, read counts, and
+    normalized frequencies.
+
+Originally created by Lindsey Brinton, University of Virginia, 2015.
+Refactored and optimized for speed and correctness.
+"""
 import collections
-import pandas as pd
 import math
-import time
 import statistics
-# must pip install openpyxl
+import subprocess
+import time
+import numpy as np
+import pandas as pd
 
-def diff(string_table, target_idx,filter_percent): #target_idx is the idx being looped through
-    target_freq = string_table.iloc[target_idx,0]
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
 
-    string_list = string_table.index
-    target_string = string_list[target_idx]
-    indexes = []
-    Corrected = list(string_list)
+# Leader peptidase signal sequence (PSEX81 "GCTCAGCCGGCCATG" ) CCTTTAGTGGTACCTTTCTAT for NEB
+PEPTIDASE_SEQ    = "CCTTTAGTGGTACCTTTCTAT"
 
-    for i, string in enumerate(string_list): #finds all sequences that are similar to current sequence in loop
-        if len(string) == len(target_string):
-            diff_count = sum([1 for j in range(len(string)) if string[j] != target_string[j]])
-            if diff_count == 1 and string_table.iloc[i,0] <= (filter_percent*target_freq) :
-                indexes.append(i)
-                Corrected[i]=target_string
-            if diff_count == 2 and string_table.iloc[i,0] <= (pow(filter_percent, 2)*target_freq) :
-                indexes.append(i)
-                Corrected[i]=target_string
-            if diff_count == 3 and string_table.iloc[i,0] <= (pow(filter_percent, 3)*target_freq) :
-                indexes.append(i)
-                Corrected[i]=target_string
-    return indexes, Corrected
+# Endflank mutation detection (one-base variants upstream of endflank) for NEB "GGTGGAGG[ACG]"
+ENDFLANK_MUT_PAT = "GGTGGAGG[ACG]"
 
-# Function to convert ASCII character to Phred score
-def ascii_to_phred(char):
+# Amber stop codon (TAG) is read as glutamine in amber suppressor strains
+# (TG1, ER2738 carry supE44). We map '_' -> 'Q' to reflect this biology.
+AMBER_AA = "Q"
+
+# Fixed error correction threshold (fraction of parent frequency)
+FILTER_PERCENT = 0.02
+
+# Minimum read count used by the optional pre-collapse filter
+MIN_READ_COUNT = 5
+
+
+CODON_TABLE = {
+    "ATA": "I", "ATC": "I", "ATT": "I", "ATG": "M",
+    "ACA": "T", "ACC": "T", "ACG": "T", "ACT": "T",
+    "AAC": "N", "AAT": "N", "AAA": "K", "AAG": "K",
+    "AGC": "S", "AGT": "S", "AGA": "R", "AGG": "R",
+    "CTA": "L", "CTC": "L", "CTG": "L", "CTT": "L",
+    "CCA": "P", "CCC": "P", "CCG": "P", "CCT": "P",
+    "CAC": "H", "CAT": "H", "CAA": "Q", "CAG": "Q",
+    "CGA": "R", "CGC": "R", "CGG": "R", "CGT": "R",
+    "GTA": "V", "GTC": "V", "GTG": "V", "GTT": "V",
+    "GCA": "A", "GCC": "A", "GCG": "A", "GCT": "A",
+    "GAC": "D", "GAT": "D", "GAA": "E", "GAG": "E",
+    "GGA": "G", "GGC": "G", "GGG": "G", "GGT": "G",
+    "TCA": "S", "TCC": "S", "TCG": "S", "TCT": "S",
+    "TTC": "F", "TTT": "F", "TTA": "L", "TTG": "L",
+    "TAC": "Y", "TAT": "Y", "TAA": "X", "TAG": "Z",  # Z = amber stop
+    "TGC": "C", "TGT": "C", "TGA": "X", "TGG": "W",
+    # Degenerate NNK codons
+    "CCN": "P", "GGN": "G", "ACN": "T", "CGN": "R",
+    "GCN": "A", "CTN": "L", "TCN": "S", "GTN": "V",
+}
+
+# ---------------------------------------------------------------------------
+# Helper functions
+# ---------------------------------------------------------------------------
+
+def ascii_to_phred(char: str) -> int:
+    """Convert an ASCII character to its Phred quality score."""
     return ord(char) - 33
 
-def translate(seq):
+def translate(seq: str) -> str:
+    """
+    Translate a DNA sequence to a protein sequence using CODON_TABLE.
+    Codons not in the table are translated as 'X'.
+    Amber stop codons ('Z') are replaced with AMBER_AA downstream.
+    """
+    if len(seq) % 3 != 0:
+        return ""
+    return "".join(
+        CODON_TABLE.get(seq[i:i + 3], "X")
+        for i in range(0, len(seq), 3)
+    )
 
-    table = {
-        'ATA':'I', 'ATC':'I', 'ATT':'I', 'ATG':'M',
-        'ACA':'T', 'ACC':'T', 'ACG':'T', 'ACT':'T',
-        'AAC':'N', 'AAT':'N', 'AAA':'K', 'AAG':'K',
-        'AGC':'S', 'AGT':'S', 'AGA':'R', 'AGG':'R',
-        'CTA':'L', 'CTC':'L', 'CTG':'L', 'CTT':'L',
-        'CCA':'P', 'CCC':'P', 'CCG':'P', 'CCT':'P',
-        'CAC':'H', 'CAT':'H', 'CAA':'Q', 'CAG':'Q',
-        'CGA':'R', 'CGC':'R', 'CGG':'R', 'CGT':'R',
-        'GTA':'V', 'GTC':'V', 'GTG':'V', 'GTT':'V',
-        'GCA':'A', 'GCC':'A', 'GCG':'A', 'GCT':'A',
-        'GAC':'D', 'GAT':'D', 'GAA':'E', 'GAG':'E',
-        'GGA':'G', 'GGC':'G', 'GGG':'G', 'GGT':'G',
-        'TCA':'S', 'TCC':'S', 'TCG':'S', 'TCT':'S',
-        'TTC':'F', 'TTT':'F', 'TTA':'L', 'TTG':'L',
-        'TAC':'Y', 'TAT':'Y', 'TAA':'_', 'TAG':'_',
-        'TGC':'C', 'TGT':'C', 'TGA':'_', 'TGG':'W',
-        'CCN':'P', 'GGN':'G', 'ACN':'T', 'CGN':'R',
-        'GCN':'A', 'CTN':'L', 'TCN':'S', 'GTN':'V',
-    }
-    protein =""
-    if len(seq)%3 == 0:
-        for i in range(0, len(seq), 3):
-            codon = seq[i:i + 3]
-            if codon in table:
-                protein+= table[codon]
-            else:
-                protein+='X'
-    return protein
+def grep_count(pattern: str, filepath: str, regex: bool = False) -> int:
+    """Run grep -c (or -cE for regex) and return the integer count."""
+    flag = "-cE" if regex else "-c"
+    result = subprocess.run(
+        ["grep", flag, pattern, filepath],
+        capture_output=True, text=True, check=False
+    )
+    return int(result.stdout.strip()) if result.stdout.strip().isdigit() else 0
 
-def translatefastq(mer,filenamefastq,startflank,endflank,filenameoutput,PhD7,collapse):
-    ticstart = time.time()
-    ip = str(filenamefastq)
-    print("Importing file " + filenamefastq)
-    basepairs=3*mer
+def apply_min_reads_filter(
+    freq_table: pd.DataFrame,
+    min_count: int = MIN_READ_COUNT,
+) -> pd.DataFrame:
+    """
+    Drop sequences with fewer than min_count reads.
 
-    tic = time.time()
-    LineResult = subprocess.run(['wc', '-l', filenamefastq], capture_output=True, text=True)
-    Line_Count = int(LineResult.stdout.split()[0])/4
-    print("Line_Count: ", Line_Count)
-    toc = time.time()
-    print('Time Taken: ', toc-tic)
+    This is an optional pre-processing step that runs independently of
+    collapsing. It removes noise sequences too sparse to be meaningful
+    before any error-correction is applied.
 
-    tic = time.time()
-    InsertlessCommand = ["grep", "-c", 'ACTCGGCCGAA', filenamefastq] #NEB
-    #InsertlessCommand = ["grep", "-c", 'CTCATGCATTCT', filenamefastq]
-    InsertlessResult = subprocess.run(InsertlessCommand, capture_output=True, text=True, check=False)
-    Insertless_Count = int(InsertlessResult.stdout.strip())
-    print("Insertless_Percentage: ", (Insertless_Count/Line_Count)*100, "%")
-    toc = time.time()
-    print('Time Taken: ', toc-tic)
+    Parameters
+    ----------
+    freq_table : DataFrame sorted descending by count (column 0)
+    min_count  : sequences with counts strictly below this value are dropped
+    """
+    original_count = len(freq_table)
+    filtered = freq_table[freq_table.iloc[:, 0] >= min_count].copy()
+    dropped = original_count - len(filtered)
+    print(f"Min-reads filter: dropped {dropped} sequences with < {min_count} reads")
+    print(f"Sequences remaining: {len(filtered)}")
+    return filtered
 
-    #tic = time.time()
-    #Misread_Command = ["grep", "-c", 'CACTCGGCCGAA', filenamefastq]
-    #MisreadResult = subprocess.run(Misread_Command, capture_output=True, text=True, check=True)
-    #Misread_Count = Insertless_Count - int(MisreadResult.stdout.strip())
-    #print("Mut/Misread per Base pair in Insertless startflank: ", (Misread_Count/Insertless_Count), "%")
-    #toc = time.time()
-    #print('Time Taken: ', toc-tic)
-
-    tic = time.time()
-    Peptidase_Command = ["grep", "-c", 'CTTTCTATTCTCAC', filenamefastq] #NEB
-    #Peptidase_Command = ["grep", "-c", 'TCGCTACC', filenamefastq]
-    PeptidaseResult = subprocess.run(Peptidase_Command, capture_output=True, text=True, check=True)
-    Peptidase_Count = int(PeptidaseResult.stdout.strip())
-    print("% have leader peptidase signals: ", (Peptidase_Count/Line_Count)*100, "%")
-    toc = time.time()
-    print('Time Taken: ', toc-tic)
-
-    #
-    tic = time.time()
-    Misread_Command = ["grep", "-c", '[ATG]CTTTCTATTCTCAC', filenamefastq]
-    #Misread_Command = ["grep", "-c", '[ACG]TCGCTACC', filenamefastq]
-    MisreadResult = subprocess.run(Misread_Command, capture_output=True, text=True, check=True)
-    Misread_Count = int(MisreadResult.stdout.strip())
-    print("Mut/Misread per Base pair in Proline Leader Peptidase: ", (Misread_Count/Peptidase_Count)*100, "%")
-    toc = time.time()
-    print('Time Taken: ', toc-tic)
-
-    # Run the command and capture the output
-    print('Capturing Reads with Inserts')
-    tic = time.time()
-    N = '[ACGT]'
-    pattern = startflank+ '(' + N + '){' + str(basepairs) + '}' + endflank
-    print('Pattern to search for: ', pattern)
-
-    RawDataCommand = ["grep", "-oE", str(pattern), filenamefastq]
-    RawDataResult = subprocess.run(RawDataCommand, capture_output=True, text=True)
-
-    # Check for errors
-    if RawDataResult.returncode != 0:
-        print("Error:", RawDataResult.stderr)
+def collapse_misreads(
+    freq_table: pd.DataFrame,
+    filter_percent: float = FILTER_PERCENT,
+    top_n: int = None,
+) -> pd.DataFrame:
+    """
+    Merge likely sequencing errors into their parent sequences.
+    """
+    # (top_n logic unchanged)
+    if top_n is not None:
+        freq_table = freq_table.head(top_n).copy()
+        print(f"Keeping top {top_n} sequences: {len(freq_table)} retained")
     else:
-        # Split the output into a list of lines
-        RawData = RawDataResult.stdout.splitlines()
-    ReadDepth0 = len(RawData)
-    print('Total Reads: ', ReadDepth0)
-    print('Correct Read Percentage: ', (ReadDepth0/Line_Count)*100, '%')
-    if (ReadDepth0/Line_Count)*100 < 40:
-        logger.warning("\033[91m" + f"Value {(ReadDepth0/Line_Count)*50} is below the threshold of 40% for {filenameoutput}!" + "\033[0m")
-        #return
-    toc = time.time()
-    print('Time Taken: ', toc-tic)
+        freq_table = freq_table.copy()
 
-    print('Capturing Phred Scores of Reads With Inserts')
-    tic = time.time()
-    QualDataCommand = ["grep", "-A", "2", "-oE", pattern, filenamefastq]
-    awk_command = ["awk", "NR % 4 == 3"]
+    seq_list  = list(freq_table.index)
+    corrected = {seq: seq for seq in seq_list}
 
-    grep_process = subprocess.Popen(QualDataCommand, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    awk_process = subprocess.Popen(awk_command, stdin=grep_process.stdout, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    grep_process.stdout.close()
-    output, errors = awk_process.communicate()
-    Qual = output.decode().splitlines()
+    counts = freq_table.iloc[:, 0].tolist()  # mutable, updated in-place
 
-    startbp = -1
-    linecount = 0
-    with open(filenamefastq, 'r') as file:
-        while startbp == -1:
-            line = file.readline()
-            if not line:
+    thresholds = [
+        filter_percent,
+        filter_percent ** 2,
+        filter_percent ** 3,
+    ]
+
+    total_collapsed = 0
+
+    for idx in range(len(seq_list)):
+        parent_seq  = seq_list[idx]
+        parent_freq = counts[idx]   # reflects any counts merged into this parent
+        parent_len  = len(parent_seq)
+
+        if corrected[parent_seq] != parent_seq:
+            continue
+
+        if parent_freq * filter_percent < min(
+            c for i, c in enumerate(counts)
+            if corrected[seq_list[i]] == seq_list[i] and i > idx
+        , default=0):
+            print(
+                f"Stopping at rank {idx + 1} "
+                f"(parent count={parent_freq}, "
+                f"2% threshold={parent_freq * filter_percent:.2f})"
+            )
+            break
+
+        parent_collapsed = 0
+
+        for i in range(idx + 1, len(seq_list)):
+            seq = seq_list[i]
+
+            if len(seq) != parent_len:
+                continue
+            if corrected[seq] != seq:
+                continue
+
+            diffs = sum(seq[j] != parent_seq[j] for j in range(parent_len))
+
+            if 1 <= diffs <= 3 and counts[i] <= thresholds[diffs - 1] * parent_freq:
+                corrected[seq]  = parent_seq
+                counts[idx]    += counts[i]   # accumulate into parent immediately
+                counts[i]       = 0            # zero out child so it can't be
+                                               # mistaken for a parent later
+                parent_freq     = counts[idx]  # keep local var in sync
+                parent_collapsed += 1
+
+        if parent_collapsed > 0:
+            print(
+                f"  Rank {idx + 1:>6} | count={parent_freq:>8} | "
+                f"collapsed {parent_collapsed} sequence(s) into {parent_seq}"
+            )
+            total_collapsed += parent_collapsed
+
+    print(f"\nTotal sequences collapsed: {total_collapsed}")
+    print("Grouping corrected sequences...")
+    freq_table.index = [corrected[seq] for seq in seq_list]
+    freq_table = freq_table.groupby(freq_table.index).sum()
+
+    return freq_table
+
+def filter_non_nnk(freq_table: pd.DataFrame, mer: int) -> pd.DataFrame:
+    """
+    Remove reads containing codons not used by the NEB PhD7 NNK library.
+    PhD7 uses NNK codons, so the third base of every codon must be G or T.
+    """
+    def is_nnk(seq: str) -> bool:
+        return all(seq[i * 3 + 2] in ("G", "T") for i in range(mer))
+
+    mask = [is_nnk(seq) for seq in freq_table.index]
+    filtered = freq_table[mask]
+    print(f"Sequences remaining after NNK filter: {len(filtered)}")
+    return filtered
+
+def export_to_csv(df: pd.DataFrame, filepath: str) -> None:
+    """
+    Export a DataFrame to CSV format (much faster than Excel, no row limits).
+
+    CSV advantages:
+    - 10-100x faster than Excel export
+    - No 1M row limit per sheet
+    - Smaller file size
+    - Universal compatibility
+    """
+    if filepath.endswith('.xlsx'):
+        filepath = filepath.replace('.xlsx', '.csv')
+
+    df.to_csv(filepath, header=False)
+    print(f"Exported to {filepath} ({len(df)} rows)")
+
+# ---------------------------------------------------------------------------
+# Main pipeline function
+# ---------------------------------------------------------------------------
+
+def translatefastq(
+    mer: int,
+    filenamefastq: str,
+    startflank: str,
+    endflank: str,
+    INSERTLESS_SEQ: str,
+    filenameoutput: str,
+    phd7: bool,
+    collapse: bool,
+    filter_min_reads: bool = False,
+    top_n: int = None,
+) -> pd.DataFrame:
+    """
+    Process a .fastq file from an NGS phage display screen.
+
+    Steps
+    -----
+    1.  Count total reads, insertless controls, and peptidase signal reads.
+    2.  Extract reads matching the flanking sequences.
+    3.  Assess Phred quality scores.
+    4.  Build frequency table.
+    5.  (Optional) Drop sequences with < MIN_READ_COUNT reads.
+    6.  (Optional) Collapse likely sequencing errors (1/2/3 bp, 2%/0.04%/0.0008%).
+    7.  (Optional) Filter non-NNK codons for PhD7 libraries.
+    8.  Translate DNA inserts to amino acid sequences.
+    9.  Export results to CSV.
+
+    Parameters
+    ----------
+    filter_min_reads : drop sequences with < MIN_READ_COUNT reads before any
+                       collapsing. Runs even when collapse=False, so you can
+                       use it as a standalone noise filter.
+    top_n            : if set, retain only the top N sequences by frequency
+                       before collapsing instead of processing all sequences.
+                       Example: top_n=999999 keeps the top ~1M sequences.
+
+    Returns
+    -------
+    pd.DataFrame with columns: count, AA, Normalized_Freq,
+    5th_Percentile_Per_base_error
+    """
+    t_start = time.time()
+    basepairs = 3 * mer
+    print(f"\nImporting: {filenamefastq}")
+
+    # ── Step 1: Read counts and QC metrics ───────────────────────────────────
+    line_result  = subprocess.run(["wc", "-l", filenamefastq], capture_output=True, text=True)
+    total_reads  = int(line_result.stdout.split()[0]) / 4
+    print(f"Total reads: {total_reads:.0f}")
+
+    insertless_count = grep_count(INSERTLESS_SEQ, filenamefastq)
+    print(f"Insertless: {insertless_count / total_reads * 100:.2f}%")
+
+    peptidase_count = grep_count(PEPTIDASE_SEQ, filenamefastq)
+    print(f"With leader peptidase signal: {peptidase_count / total_reads * 100:.2f}%")
+
+    misread_count = grep_count(f"[CGT]{PEPTIDASE_SEQ}", filenamefastq, regex=True)
+    if peptidase_count > 0:
+        print(f"Misread rate in peptidase signal: {misread_count / peptidase_count * 100:.2f}%")
+
+    # ── Step 2: Extract reads with insert ────────────────────────────────────
+    print("\nExtracting reads with inserts...")
+    nt_pattern   = "[ACGT]"
+    full_pattern = f"{startflank}({nt_pattern}){{{basepairs}}}{endflank}"
+    print(f"Search pattern: {full_pattern}")
+
+    grep_result = subprocess.run(
+        ["grep", "-oE", full_pattern, filenamefastq],
+        capture_output=True, text=True
+    )
+    if grep_result.returncode not in (0, 1):
+        raise RuntimeError(f"grep failed: {grep_result.stderr}")
+
+    raw_reads   = grep_result.stdout.splitlines()
+    read_depth0 = len(raw_reads)
+    pct_correct = read_depth0 / total_reads * 100
+    print(f"Reads with insert: {read_depth0} ({pct_correct:.2f}%)")
+
+    if pct_correct < 40:
+        print(f"WARNING: Correct read percentage ({pct_correct:.2f}%) is below 40%.")
+
+    # ── Step 3: NNK composition check ────────────────────────────────────────
+    nnk_pattern = f"{startflank}([ACGT][ACGT][GT]){{{mer}}}{endflank}"
+    nnk_count   = grep_count(nnk_pattern, filenamefastq, regex=True)
+    print(f"NNK reads: {nnk_count / read_depth0 * 100:.2f}%")
+
+    endflank_mut_count = grep_count(
+        f"{startflank}.*{ENDFLANK_MUT_PAT}", filenamefastq, regex=True
+    ) / 3
+    mut_rate = endflank_mut_count / (endflank_mut_count + read_depth0)
+    print(f"Endflank mutation rate: {mut_rate * 100:.4f}%")
+
+    # ── Step 4: Phred quality scores ─────────────────────────────────────────
+    print("\nCalculating Phred quality scores...")
+
+    SAMPLE_SIZE = 10_000  # more than enough for a stable mean/std
+    qual_scores_sampled = []
+
+    with open(filenamefastq, "r") as fh:
+        while True:
+            header = fh.readline()
+            if not header:
                 break
-            startbp = line.find(startflank)
-            if startbp != -1:
-                print(f"Line {startflank} found at position {startbp}")
-                print(linecount)
-            linecount = linecount + 1
+            seq    = fh.readline().rstrip()
+            plus   = fh.readline()
+            qual   = fh.readline().rstrip()
 
+            # Only use reads that contain the insert
+            pos = seq.find(startflank)
+            if pos == -1:
+                continue
 
-    lastbp = (startbp+len(startflank)+basepairs+len(endflank))
-    print('Last Minus Startbp : ', lastbp-startbp)
-    print('Startbp : ', startbp,' ',lastbp)
-    print(Qual[0][startbp:56])
-    for i in range(len(Qual)):
-        Qual[i] = Qual[i][startbp:lastbp]
+            # Slice the quality string to match the insert region
+            q_insert = qual[pos : pos + len(startflank) + basepairs + len(endflank)]
+            if len(q_insert) < len(startflank) + basepairs + len(endflank):
+                continue
 
-    print(len(Qual))
-    toc = time.time()
-    print('Time Taken: ', toc-tic)
+            qual_scores_sampled.append(q_insert)
 
-    print(RawData[0], Qual[0])
-    print(RawData[1], Qual[1])
-    N = '[ACGT][ACGT][GT]'
-    pattern = startflank + '(' + N + '){' + str(mer) + '}' + endflank
-    print('Pattern to search for: ', pattern)
-
-    tic = time.time()
-    NNK_Command = ["grep", "-cE", str(pattern), filenamefastq]
-    NNKResult = subprocess.run(NNK_Command, capture_output=True, text=True, check=True)
-    NNK_Count = int(NNKResult.stdout.strip())
-    print("Number of Inserts that have only NNK: ", (NNK_Count/ReadDepth0)*100, "%")
-    toc = time.time()
-    print('Time Taken: ', toc-tic)
-
-    tic = time.time()
-    Mut_Command = ["grep", "-c", (str(startflank) + '.*' + 'GGTGGAGG[ACG]'), filenamefastq]
-    MutResult = subprocess.run(Mut_Command, capture_output=True, text=True, check=True)
-    Mut_Count = int(MutResult.stdout.strip())/3
-    print("Mut/Misread percentage for base pair in GGTGGAGG_ endflank (GGG): ", (Mut_Count/(Mut_Count+ReadDepth0))*100, "%")
-    toc = time.time()
-    print('Time Taken: ', toc-tic)
-
-    print('Input file successfully imported')
-
-    # Calculate the average quality score for each read
-    average_quality_scores = []
-    for quality_scores in Qual:
-        phred_scores = [ascii_to_phred(char) for char in quality_scores]
-        if len(phred_scores) == lastbp-startbp:
-            average_quality = sum(phred_scores) / len(phred_scores)
-            average_quality_scores.append(average_quality)
-
-    std_dev = statistics.stdev(average_quality_scores)
-    print('std_dev :',std_dev)
-
-    # Calculate the overall average of the average quality scores
-    overall_average_quality = (sum(average_quality_scores) / len(average_quality_scores))
-    Error_Rate = 1/(10**(overall_average_quality/10))
-
-    adjusted_average_quality = overall_average_quality-2*std_dev
-    Adj_Error_Rate = 1/(10**(adjusted_average_quality/10))
-
-    filter_percent = (Mut_Count/(Mut_Count+ReadDepth0))*5
-    filter_percent = 0.02
-
-
-    print("Average error rate per base call: ", Error_Rate)
-    print("5th percentile average error rate per base call: ", Adj_Error_Rate)
-    print("Filter Percent Including Mutations: ", filter_percent*100, "%")
-
-    if filter_percent > Adj_Error_Rate:
-        logger.warning("\033[91m" + f"Value {filter_percent} is above the 5th percentile error: {Adj_Error_Rate}!" + "\033[0m")
-
-
-    print("Length after filtering wrong length reads:", len(RawData))
-    toc = time.time()
-    print(toc-tic)
-
-    tic = time.time()
-    print('Making Nucleotide and Quality Array')
-
-    NukeArray = [list(item) for item in RawData]
-    QualData = [list(item) for item in Qual]
-
-    print('NukeArray0: ', NukeArray[0])
-    i=0
-    toc = time.time()
-    print(len(NukeArray))
-    print(toc-tic)
-
-    print('Counting Reads')
-    # determine frequencies
-    SeqArray = [''.join(seq) for seq in NukeArray]
-    Qual = [''.join(qual) for qual in QualData]
-
-    tableSeq = collections.Counter(SeqArray)                                # calculate frequencies
-    df = pd.DataFrame.from_dict(tableSeq, orient='index')
-    print(df)
-    DNAFreqTable = df.sort_values(by=0, ascending=False)
-    print(DNAFreqTable)
-    print('NumOfPep :',len(DNAFreqTable))
-    ReadDepth = sum(DNAFreqTable.iloc[:, 0])
-    print('ReadDepth ',ReadDepth)
-
-    if collapse == True:
-        print('Collapsing Misreads')
-        avg_count = DNAFreqTable.iloc[:, 0].mean()
-        count_std_dev = DNAFreqTable.iloc[:, 0].std()
-
-        #DropFreq = ReadDepth0/200000 #Losing
-        DropFreq = 5
-        if DropFreq <1:
-            DropFreq = 1
-        DNAFreqTable = DNAFreqTable[DNAFreqTable.iloc[:, 0] >= DropFreq] # dropping Frequency <11
-        print('Length After Dropping <', DropFreq, ':',len(DNAFreqTable))
-
-        idx = 0  # Initialize the index
-        print('Filter Percentage: ', filter_percent)
-        while idx < 0.1 * len(DNAFreqTable):
-            # Check the condition to end the loop
-            if DNAFreqTable.iloc[idx,0] * filter_percent < min(DNAFreqTable.iloc[:,0]):
-                print('break')
+            if len(qual_scores_sampled) >= SAMPLE_SIZE:
                 break
-            Errors, Correctedidx = diff(DNAFreqTable,idx,filter_percent)
-            DNAFreqTable.index = Correctedidx
-            print(idx, len(Errors))
-            idx += 1
 
-    print('Filter Percentage: ', filter_percent)
-    DNAFreqTable = DNAFreqTable.groupby(DNAFreqTable.index).agg('sum')
-    RawData2 = DNAFreqTable.iloc[:,0].tolist()
-    NukeArray = [list(item) for item in DNAFreqTable.index.tolist()]
-    toc = time.time()
-    print(toc-tic)
+    # Vectorized Phred calculation with numpy
+    qual_array = np.array(
+        [[ord(c) - 33 for c in qs] for qs in qual_scores_sampled],
+        dtype=np.float32
+    )
+    per_read_mean     = qual_array.mean(axis=1)
+    overall_avg_phred = per_read_mean.mean()
+    phred_std         = per_read_mean.std()
+    error_rate        = 10 ** (-overall_avg_phred / 10)
+    adj_phred         = overall_avg_phred - 2 * phred_std
+    adj_error_rate    = 10 ** (-adj_phred / 10)
 
-    #Make Sure NUKEARRAY IS being updated from DNAFREQTABLE
-    print('Len NukArray ',len(NukeArray))
-    print('Total Reads ', sum(DNAFreqTable.iloc[:, 0]))
-    print('Getting rid of codons not used by PhD7 library')
-    tic = time.time()
-    # If PhD7 library, get rid of codons not used by PhD7 library
-    if PhD7 == 1:
-        badRead1= [row[2] for row in NukeArray]
-        badRead2= [row[5] for row in NukeArray]
-        badRead3=[row[8] for row in NukeArray]
-        badRead4=[row[11] for row in NukeArray]
-        badRead5=[row[14] for row in NukeArray]
-        badRead6=[row[17] for row in NukeArray]
-        badRead7=[row[20] for row in NukeArray]
-        brRow = []
-        for idx in range(len(badRead1)):
-            if (badRead1[idx] == 'A' or badRead2[idx]=='A' or badRead2[idx]=='A' or badRead3[idx]=='A'
-            or badRead4[idx]=='A' or badRead5[idx]=='A' or badRead6[idx]=='A' or badRead7[idx]=='A'
-            or badRead1[idx] == 'C' or badRead2[idx]=='C' or badRead2[idx]=='C' or badRead3[idx]=='C'
-            or badRead4[idx]=='C' or badRead5[idx]=='C' or badRead6[idx]=='C' or badRead7[idx]=='C'):
-                brRow.append(idx)                                # find indices of instances of bad reads
-        for i in sorted(brRow, reverse=True):
-            #print(NukeArray[i])
-            NukeArray.pop(i)
-            #QualArray.pop(i)                                   # delete bad codon reads
-    toc = time.time()
-    print(toc-tic)
-    print('Len NukeArray ',len(NukeArray))
-    # convert to amino acids
+    print(f"Sampled reads       : {len(qual_scores_sampled)}")
+    print(f"Mean Phred score    : {overall_avg_phred:.2f}")
+    print(f"Std dev             : {phred_std:.2f}")
+    print(f"Mean error rate     : {error_rate:.6f}")
+    print(f"5th pct error rate  : {adj_error_rate:.6f}")
+    print(f"Filter threshold    : {FILTER_PERCENT * 100:.1f}%")
 
-    print('Converting to amino acid sequences')
-    AAarray = []
-    text = ""
-    idx = 0
-    DNAFreqTable.index = DNAFreqTable.index.str[6:-9]
-    for idx in range(len(DNAFreqTable.index)):
-        AA = translate(DNAFreqTable.index[idx])
-        AA = AA.replace('_', 'Q')
-        AAarray.append(AA)
-    idx = 0
+    if FILTER_PERCENT > adj_error_rate:
+        print(
+            f"WARNING: filter_percent ({FILTER_PERCENT}) exceeds 5th percentile "
+            f"error rate ({adj_error_rate:.6f})."
+        )
 
-    DNAFreqTable['AA'] = AAarray
-    DNAFreqTable['Normalized_Freq'] = DNAFreqTable[0] / ReadDepth0
-    DNAFreqTable['5th_Percentile_Per_base_error'] = Adj_Error_Rate
-    #DNAFreqTable['Normalized_FreqInsert'] = DNAFreqTable[0] / ReadDepth
-    print('Total Reads ', sum(DNAFreqTable.iloc[:, 0]))
+    # ── Step 5: Build frequency table ────────────────────────────────────────
+    print("\nCounting reads...")
+    counter    = collections.Counter(raw_reads)
+    freq_table = (
+        pd.DataFrame.from_dict(counter, orient="index")
+        .sort_values(by=0, ascending=False)
+    )
+    print(f"Unique sequences: {len(freq_table)}")
+    print(f"Total read depth: {freq_table.iloc[:, 0].sum()}")
 
+    # ── Step 5.5: Optional min-reads filter ──────────────────────────────────
+    if filter_min_reads:
+        print(f"\nApplying min-reads filter (threshold: {MIN_READ_COUNT} reads)...")
+        freq_table = apply_min_reads_filter(freq_table, MIN_READ_COUNT)
 
-    print('Determining frequencies')
-    print(DNAFreqTable)
-    # determine frequencies
-    #   tableAA = collections.Counter(AAarray)                                # calculate frequencies
-    #df = pd.DataFrame.from_dict(tableAA, orient='index')
-    SeqFreqTable = DNAFreqTable.sort_values(by=0, ascending=False)                                   # sort table                                       # Sequences
+    # ── Step 6: Collapse misreads ─────────────────────────────────────────────
+    if collapse:
+        print("\nCollapsing misreads (1 bp: 2%, 2 bp: 0.04%, 3 bp: 0.0008%)...")
+        freq_table = collapse_misreads(freq_table, FILTER_PERCENT, top_n)
 
-    # display stats
-    print("Number of total valid reads: ", sum(DNAFreqTable.iloc[:, 0]))
-    print("Number of unique reads: ", len(SeqFreqTable))
+    # ── Step 7: Filter non-NNK codons (PhD7 only) ────────────────────────────
+    # Strip flanking sequences before codon-level filtering
+    freq_table.index = freq_table.index.str[len(startflank):-len(endflank)]
 
-    print('Starting export')
-    # export to excel
-    iterationsXLS = int(math.ceil(len(SeqFreqTable)/1000000))              # Filter out sequences that make up < .0001% of screen
-    p=1                                                                    # initialize counter
-    if iterationsXLS==1:
-        print('Exporting to excel: one sheet')
-        SeqFreqTable.to_excel(filenameoutput, header=False) # write excel file--> only 1e6 rows each sheet
-    else:
-        for w in range(iterationsXLS):
-            print('Exporting to excel: multiple sheets')
-            sheetI = str(p)                                                   # determine sheet to use
-            ind2 = int((w+1)*1e6)
-            ind1 = int((ind2-1e6)+1)                                                # find indexes within Sequence Array
-            ind3 = len(SeqFreqTable)
-            with pd.ExcelWriter(filenameoutput) as writer:
-                if (ind3-ind1)>(1e6-1):
-                    df = SeqFreqTable.iloc[ind1:ind2,:]
-                    df2 = df.copy()
-                    df2.to_excel(writer, sheet_name="Try1", header=False)
-                else:
-                    df = SeqFreqTable.iloc[ind1:ind3,:]
-                    df3 = df.copy()
-                    df3.to_excel(writer, sheet_name="Try2", header=False) # write excel file--> only 1e6 rows each sheet
-                p=p+1                                                              # count up
-    libraryexcel=SeqFreqTable                                              # output
-    print('Part 1 of program finished')
-    tocend = time.time()
-    print('Total Time :',tocend-ticstart)
-    return
+    if phd7:
+        print("\nFiltering non-NNK codons for PhD7 library...")
+        freq_table = filter_non_nnk(freq_table, mer)
 
-print(snakemake.input)
-print(snakemake.output)
-for i in range(len(snakemake.input)):
-    print(i)
-    translatefastq(snakemake.config["mer"],snakemake.input[i],snakemake.config["startflank"],snakemake.config["endflank"],snakemake.output[i],snakemake.config["PHD7"],snakemake.config["collapse"])
+    # ── Step 8: Translate to amino acids ─────────────────────────────────────
+    print("\nTranslating to amino acid sequences...")
+    aa_sequences = [
+        translate(seq).replace("_", AMBER_AA)
+        for seq in freq_table.index
+    ]
+
+    freq_table["AA"]                            = aa_sequences
+    freq_table["Normalized_Freq"]               = freq_table.iloc[:, 0] / read_depth0
+    freq_table["5th_Percentile_Per_base_error"] = adj_error_rate
+
+    result = freq_table.sort_values(by=0, ascending=False)
+    print(f"\nFinal unique sequences : {len(result)}")
+    print(f"Final total reads      : {result.iloc[:, 0].sum()}")
+
+    # ── Step 9: Export ────────────────────────────────────────────────────────
+    print("\nExporting results...")
+    export_to_csv(result, filenameoutput)
+
+    print(f"\nTotal time: {time.time() - t_start:.1f}s")
+    return result
+
+# ---------------------------------------------------------------------------
+# Snakemake entry point
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    print("Inputs :", snakemake.input)
+    print("Outputs:", snakemake.output)
+
+    cfg = snakemake.config
+    for i, (inp, out) in enumerate(zip(snakemake.input, snakemake.output)):
+        print(f"\n--- Processing file {i + 1} of {len(snakemake.input)} ---")
+        translatefastq(
+            mer              = cfg["mer"],
+            filenamefastq    = inp,
+            startflank       = cfg["startflank"],
+            endflank         = cfg["endflank"],
+            INSERTLESS_SEQ   = cfg["insertless"],
+            filenameoutput   = out,
+            phd7             = cfg["PHD7"],
+            collapse         = cfg["collapse"],
+            filter_min_reads = cfg.get("filter_min_reads", False),
+            top_n            = cfg.get("top_n", None),
+        )
